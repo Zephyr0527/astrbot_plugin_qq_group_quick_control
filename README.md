@@ -254,7 +254,7 @@ python -m unittest discover -s tests -v
 - 插件状态为 `activated: true`，版本 `1.0.0`；
 - 页面 `qq_group_quick_control` 被主实例发现并可在 WebUI 中打开；
 - 主实例页面成功读取到 OneBot 群列表，检测到 meme_manager 与 stealer；
-- 未修改任何真实群配置，未发送真实群消息，未调用模型。
+- 未修改任何真实群配置，未发送真实群消息，未由本插件主动触发模型调用。
 
 页面实际运行截图（隔离实例，无 OneBot 平台，群为手动添加的测试数据）：
 
