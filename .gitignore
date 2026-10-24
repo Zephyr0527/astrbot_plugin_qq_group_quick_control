@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+*.log
+/data/
+groups.json
+groups.json.bak
+groups.json.corrupt-*
+.DS_Store
+Thumbs.db

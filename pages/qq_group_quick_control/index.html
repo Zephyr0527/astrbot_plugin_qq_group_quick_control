@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QQ群聊一键操作</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">AstrBot · OneBot 群管理</p>
+          <h1>QQ群聊一键操作</h1>
+          <p class="subtitle">
+            为每个群单独控制主动回复、自动表情包和回应开关，并设置独立的主动回复概率。
+            群备注只保存在本插件中，不会修改 QQ 真实群名。
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button id="refresh-button" class="button ghost" type="button">
+            刷新群列表
+          </button>
+          <button id="open-add-button" class="button primary" type="button">
+            添加群
+          </button>
+        </div>
+      </header>
+
+      <section id="warning-panel" class="warning-panel" hidden aria-live="polite">
+        <h2>运行提示</h2>
+        <ul id="warning-list"></ul>
+      </section>
+
+      <section id="stat-strip" class="stat-strip" aria-label="群配置概况">
+        <div class="stat">
+          <span id="stat-total" class="stat-value">0</span>
+          <span class="stat-label">管理中的群</span>
+        </div>
+        <div class="stat">
+          <span id="stat-configured" class="stat-value">0</span>
+          <span class="stat-label">已有独立配置</span>
+        </div>
+        <div class="stat">
+          <span id="global-auto" class="stat-value">读取中</span>
+          <span class="stat-label">全局主动回复</span>
+        </div>
+        <div class="stat">
+          <span id="adapter-state" class="stat-value">读取中</span>
+          <span class="stat-label">表情包适配</span>
+        </div>
+      </section>
+
+      <section class="toolbar" aria-label="群列表工具栏">
+        <label class="search-box" for="search-input">
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input
+            id="search-input"
+            type="search"
+            autocomplete="off"
+            placeholder="搜索群号、真实群名或备注"
+          />
+        </label>
+        <span id="result-count" class="result-count">正在读取群列表…</span>
+      </section>
+
+      <main id="group-grid" class="group-grid" aria-live="polite"></main>
+      <p id="no-results" class="no-results" hidden>没有匹配的群。</p>
+
+      <section id="empty-state" class="empty-state" hidden>
+        <div class="empty-art" aria-hidden="true">群</div>
+        <h2>还没有可管理的群</h2>
+        <p>
+          如果 OneBot 已连接，点击「刷新群列表」即可读取群列表；也可以直接输入群号添加。
+        </p>
+        <button id="empty-add-button" class="button primary" type="button">
+          手动添加群
+        </button>
+      </section>
+
+      <details class="how-it-works">
+        <summary>三个开关分别控制什么？</summary>
+        <div class="how-grid">
+          <div>
+            <h3>自动回复</h3>
+            <p>
+              控制该群是否参与 AstrBot 的「主动回复」。开启后只使用本群设置的概率；
+              关闭后不会进行概率判断，也不会产生主动回复。
+            </p>
+          </div>
+          <div>
+            <h3>表情包</h3>
+            <p>
+              控制 meme_manager 附加表情图，以及 stealer 的自动发表情。关闭后，
+              该群不会再被这些插件自动配图或发表情；表情包收集/偷取属于独立功能，
+              不由本开关控制。
+            </p>
+          </div>
+          <div>
+            <h3>是否回应</h3>
+            <p>
+              关闭后，该群的普通消息和 @ 消息不再触发 AstrBot 默认 AI 回复；
+              管理员指令和其他插件的固定功能仍可使用，其他群和私聊不受影响。
+            </p>
+          </div>
+        </div>
+        <p class="how-note">
+          未单独配置的群保持 AstrBot 原有行为；保存任意一行后，该行才会应用插件开关。
+          恢复默认会关闭主动回复和表情包、保留回应，并保留群备注。
+        </p>
+      </details>
+    </div>
+
+    <template id="group-template">
+      <article class="group-card">
+        <div class="card-head">
+          <div class="identity">
+            <div class="group-id-row">
+              <strong class="group-id"></strong>
+              <span class="badge configured-badge" hidden></span>
+              <span class="badge source-badge" hidden></span>
+            </div>
+            <p class="group-name"><span class="muted">真实群名：</span></p>
+          </div>
+          <div class="effective-chips" aria-label="生效状态"></div>
+        </div>
+
+        <label class="field remark-field">
+          <span class="field-label">群备注 <span class="muted">（自定义标签）</span></span>
+          <input
+            class="text-input"
+            data-field="remark"
+            type="text"
+            maxlength="64"
+            autocomplete="off"
+            placeholder="例如：主测试群 / 闲聊群"
+          />
+        </label>
+
+        <div class="switch-grid">
+          <label class="switch-row">
+            <span class="switch-copy">
+              <strong>自动回复</strong>
+              <small>参与主动回复</small>
+            </span>
+            <span class="switch">
+              <input type="checkbox" data-field="auto_reply_enabled" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+          <label class="switch-row">
+            <span class="switch-copy">
+              <strong>表情包</strong>
+              <small>自动配图 / 发表情</small>
+            </span>
+            <span class="switch">
+              <input type="checkbox" data-field="meme_enabled" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+          <label class="switch-row">
+            <span class="switch-copy">
+              <strong>是否回应</strong>
+              <small>普通消息 / @ 消息</small>
+            </span>
+            <span class="switch">
+              <input type="checkbox" data-field="respond_enabled" />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+        </div>
+
+        <div class="probability-field">
+          <div class="probability-heading">
+            <span class="field-label">主动回复概率</span>
+            <span class="probability-value"><span data-field="probability-label">20</span>%</span>
+          </div>
+          <div class="probability-controls">
+            <input
+              data-field="probability-range"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value="20"
+              aria-label="主动回复概率"
+            />
+            <input
+              data-field="probability-number"
+              type="number"
+              min="0"
+              max="100"
+              step="0.1"
+              value="20"
+              inputmode="decimal"
+              aria-label="主动回复概率百分比"
+            />
+            <span class="percent-sign">%</span>
+          </div>
+          <p class="field-hint">
+            仅在「自动回复」开启且群满足全局主动回复条件时生效。
+          </p>
+        </div>
+
+        <p class="inherited-note" hidden></p>
+
+        <footer class="card-actions">
+          <span class="row-status" aria-live="polite"></span>
+          <div class="action-buttons">
+            <button class="button subtle" type="button" data-action="reset">
+              恢复默认
+            </button>
+            <button class="button primary" type="button" data-action="save">
+              保存
+            </button>
+          </div>
+        </footer>
+      </article>
+    </template>
+
+    <dialog id="add-dialog" class="dialog">
+      <form id="add-form" method="dialog">
+        <div class="dialog-head">
+          <div>
+            <h2>添加群</h2>
+            <p class="muted">输入群号后可以把尚未出现在列表中的群加入管理。</p>
+          </div>
+          <button id="close-add-button" class="icon-button" type="button" aria-label="关闭">
+            ×
+          </button>
+        </div>
+        <label class="field">
+          <span class="field-label">群号</span>
+          <input
+            id="add-group-id"
+            class="text-input"
+            type="text"
+            inputmode="numeric"
+            pattern="[0-9]{5,20}"
+            maxlength="20"
+            required
+            placeholder="例如 123456789"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">群备注 <span class="muted">（可选）</span></span>
+          <input
+            id="add-remark"
+            class="text-input"
+            type="text"
+            maxlength="64"
+            autocomplete="off"
+            placeholder="仅保存在本插件中"
+          />
+        </label>
+        <p class="dialog-hint">
+          如果 OneBot 能读取群列表，会先校验收到的群号；读取失败时允许手动添加，
+          请自行核对群号。新群默认关闭表情包、保留回应。
+        </p>
+        <p id="add-error" class="form-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="cancel-add-button" class="button subtle" type="button">
+            取消
+          </button>
+          <button id="submit-add-button" class="button primary" type="submit">
+            添加
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

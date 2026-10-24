@@ -1,0 +1,19 @@
+name: astrbot_plugin_qq_group_quick_control
+display_name: QQ群聊一键操作
+short_desc: 在 WebUI 中按群管理自动回复、表情包、回应开关与独立主动回复概率
+desc: >-
+  为 AstrBot 提供独立的「QQ群聊一键操作」WebUI 页面。可以查看群列表、编辑群备注，
+  分别控制每个群的主动回复、自动表情包发送与是否回应，并为每个群设置独立的主动回复概率。
+  配置保存在插件自己的数据目录，修改后立即生效；未单独配置的群保持 AstrBot 原有行为。
+version: 1.0.0
+author: Zephyr0527
+repo: https://github.com/Zephyr0527/astrbot_plugin_qq_group_quick_control
+astrbot_version: ">=4.29.0,<5.0.0"
+support_platforms:
+  - aiocqhttp
+tags:
+  - 群管理
+  - WebUI
+  - 主动回复
+  - 表情包
+  - OneBot
