@@ -249,6 +249,13 @@ python -m unittest discover -s tests -v
 - 未登录请求返回 401；错误概率、错误布尔值、非法群号均被后端拒绝；
 - 恢复默认、备注保留、WebUI 页面资源加载与路径穿越防护均通过。
 
+此外，已将同一份源码安装到当前 AstrBot 主实例，并通过 WebUI 的插件重载接口完成加载：
+
+- 插件状态为 `activated: true`，版本 `1.0.0`；
+- 页面 `qq_group_quick_control` 被主实例发现并可在 WebUI 中打开；
+- 主实例页面成功读取到 OneBot 群列表，检测到 meme_manager 与 stealer；
+- 未修改任何真实群配置，未发送真实群消息，未调用模型。
+
 页面实际运行截图（隔离实例，无 OneBot 平台，群为手动添加的测试数据）：
 
 ![隔离 AstrBot 实例中的真实页面](docs/screenshot-live.png)
