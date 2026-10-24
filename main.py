@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
+from dataclasses import dataclass
 from sys import maxsize
 from typing import Any
 
@@ -60,6 +61,44 @@ MEME_MANAGER_PLUGIN_NAME = "meme_manager"
 TESTED_MEME_MANAGER_VERSION = "5.2.5"
 GROUP_LIST_CACHE_SECONDS = 20
 OBSERVED_FLUSH_INTERVAL_SECONDS = 300
+BOUND_PLATFORM_ID = "qq-snowluma"
+BOUND_BOT_QQ = "3566720028"
+
+
+@dataclass(frozen=True, slots=True)
+class BotAccount:
+    """The one bot account this plugin is allowed to manage."""
+
+    platform_id: str = BOUND_PLATFORM_ID
+    expected_qq: str = BOUND_BOT_QQ
+    qq: str = ""
+    nickname: str = ""
+    verified: bool = False
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "platform_id": self.platform_id,
+            "expected_qq": self.expected_qq,
+            "qq": self.qq,
+            "nickname": self.nickname,
+            "verified": self.verified,
+            "error": self.error,
+        }
+
+
+@dataclass(slots=True)
+class GroupListResult:
+    """Result of one locked-account group-list refresh."""
+
+    groups: list[dict[str, Any]]
+    warnings: list[str]
+    account: BotAccount
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.account.verified and not self.error
 
 
 class QQGroupQuickControl(Star):
@@ -70,7 +109,7 @@ class QQGroupQuickControl(Star):
         self.config = config or {}
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         self.store = GroupConfigStore(self.data_dir / "groups.json")
-        self._group_cache: tuple[float, list[dict[str, Any]], list[str]] | None = None
+        self._group_cache: tuple[float, GroupListResult] | None = None
         self._last_group_success: list[dict[str, Any]] = []
         self._group_lock = asyncio.Lock()
         self._last_observed_flush = 0.0
@@ -171,14 +210,20 @@ class QQGroupQuickControl(Star):
             "true",
             "yes",
         }
-        onebot_groups, warnings = await self._get_group_list(force=force)
+        result = await self._get_group_list(force=force)
+        warnings = list(result.warnings)
         try:
             await self.store.flush_observed()
         except Exception:
             logger.exception("保存群名称缓存失败")
             warnings.append("群名称缓存写入失败，但不影响现有群配置。")
 
-        groups = self._build_group_views(onebot_groups)
+        groups = self._build_group_views(result.groups) if result.ok else []
+        preserved = self._preserved_counts(result.groups if result.ok else None)
+        if result.ok:
+            warnings.extend(self._preserved_warnings(preserved))
+        else:
+            warnings.append("账号或群列表验证未通过，本次不显示任何群。")
         global_state = self._global_state()
         warnings.extend(self._runtime_warnings(global_state))
         return self._ok(
@@ -187,10 +232,12 @@ class QQGroupQuickControl(Star):
                 "counts": {
                     "total": len(groups),
                     "configured": sum(1 for item in groups if item["configured"]),
-                    "onebot": sum(
-                        1 for item in groups if item["source"] == "onebot"
-                    ),
+                    "onebot": len(groups),
                 },
+                "bot_account": result.account.to_dict(),
+                "list_status": "ok" if result.ok else "error",
+                "list_error": result.error,
+                "preserved": preserved,
                 "global": global_state,
                 "adapters": self._adapter_status(),
                 "defaults": {
@@ -215,6 +262,9 @@ class QQGroupQuickControl(Star):
             return self._bad("请求体必须是 JSON 对象。")
         try:
             group_id = parse_group_id(payload.get("group_id"))
+            verify_error = await self._verify_group_for_write(group_id)
+            if verify_error:
+                return self._bad(verify_error)
             existing = self.store.get(group_id)
             base = existing or self._page_default_config(group_id)
             remark = (
@@ -293,6 +343,20 @@ class QQGroupQuickControl(Star):
         except ValidationError as exc:
             return self._bad(str(exc))
 
+        result = await self._get_group_list(force=True)
+        if not result.ok:
+            return self._bad(
+                result.error
+                or "无法验证机器人账号 qq-snowluma 的登录信息，已停止添加群。"
+            )
+        known_ids = {item["group_id"] for item in result.groups}
+        if group_id not in known_ids:
+            return self._bad(
+                f"群 {group_id} 不在机器人 {result.account.qq} 的当前群列表中，"
+                "拒绝添加。"
+            )
+        warnings = list(result.warnings)
+
         existing = self.store.get(group_id)
         if existing:
             return self._ok(
@@ -305,18 +369,6 @@ class QQGroupQuickControl(Star):
                     ),
                     "message": "该群已有自定义配置，未做修改。",
                 }
-            )
-
-        onebot_groups, warnings = await self._get_group_list(force=True)
-        known_ids = {item["group_id"] for item in onebot_groups}
-        if known_ids and group_id not in known_ids:
-            return self._bad(
-                f"群 {group_id} 不在当前 OneBot 群列表中。"
-                "请确认群号；如果机器人确实不在该群，无法添加。"
-            )
-        if not known_ids:
-            warnings.append(
-                "未能从 OneBot 确认群号，已按手动添加处理，请自行核对。"
             )
 
         inherited = self._inherited_state(group_id)
@@ -399,16 +451,14 @@ class QQGroupQuickControl(Star):
     # Group list and page view
     # ------------------------------------------------------------------
 
-    async def _get_group_list(
-        self, *, force: bool = False
-    ) -> tuple[list[dict[str, Any]], list[str]]:
+    async def _get_group_list(self, *, force: bool = False) -> GroupListResult:
         now = time.monotonic()
         if (
             not force
             and self._group_cache is not None
             and now - self._group_cache[0] < GROUP_LIST_CACHE_SECONDS
         ):
-            return self._group_cache[1], list(self._group_cache[2])
+            return self._group_cache[1]
 
         async with self._group_lock:
             now = time.monotonic()
@@ -417,106 +467,216 @@ class QQGroupQuickControl(Star):
                 and self._group_cache is not None
                 and now - self._group_cache[0] < GROUP_LIST_CACHE_SECONDS
             ):
-                return self._group_cache[1], list(self._group_cache[2])
+                return self._group_cache[1]
 
-            groups: list[dict[str, Any]] = []
-            warnings: list[str] = []
-            seen: dict[str, dict[str, Any]] = {}
-            platform_count = 0
+            result = await self._fetch_group_list_locked()
+            if result.ok:
+                self._group_cache = (time.monotonic(), result)
+                self._last_group_success = list(result.groups)
+            else:
+                # Never fall back to an older list after account/list failure.
+                self._group_cache = None
+            return result
+
+    async def _fetch_group_list_locked(self) -> GroupListResult:
+        """Verify the locked account, then read only that account's groups."""
+        warnings: list[str] = []
+        account = BotAccount()
+
+        try:
+            platforms = list(self.context.platform_manager.platform_insts)
+        except Exception as exc:
+            error = f"读取 AstrBot 平台列表失败：{type(exc).__name__}: {exc}"
+            return GroupListResult([], warnings, account, error)
+
+        platform = None
+        for candidate in platforms:
             try:
-                platforms = list(self.context.platform_manager.platform_insts)
+                meta = candidate.meta()
             except Exception:
-                platforms = []
-            for platform in platforms:
-                try:
-                    meta = platform.meta()
-                except Exception:
-                    continue
-                if getattr(meta, "name", "") != "aiocqhttp":
-                    continue
-                platform_count += 1
-                platform_id = getattr(meta, "id", "") or "aiocqhttp"
-                get_client = getattr(platform, "get_client", None)
-                if not callable(get_client):
-                    warnings.append(f"平台 {platform_id} 不支持获取群列表。")
-                    continue
-                try:
-                    client = get_client()
-                    action = getattr(client, "call_action", None)
-                    if callable(action):
-                        result = await asyncio.wait_for(
-                            action("get_group_list"), timeout=8
-                        )
-                    else:
-                        getter = getattr(client, "get_group_list", None)
-                        if not callable(getter):
-                            warnings.append(
-                                f"平台 {platform_id} 的 OneBot 客户端不支持 get_group_list。"
-                            )
-                            continue
-                        result = await asyncio.wait_for(getter(), timeout=8)
-                except Exception as exc:
-                    warnings.append(
-                        f"从平台 {platform_id} 获取群列表失败："
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                    continue
+                continue
+            if getattr(meta, "id", "") == BOUND_PLATFORM_ID:
+                platform = candidate
+                break
 
-                items = result.get("data") if isinstance(result, dict) else result
-                if not isinstance(items, list):
-                    warnings.append(
-                        f"平台 {platform_id} 返回了无法识别的群列表格式。"
-                    )
-                    continue
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    try:
-                        group_id = parse_group_id(item.get("group_id"))
-                    except ValidationError:
-                        continue
-                    name = str(item.get("group_name") or "").strip()
-                    try:
-                        member_count = int(item.get("member_count") or 0)
-                    except (TypeError, ValueError):
-                        member_count = 0
-                    previous = seen.get(group_id)
-                    if previous is not None:
-                        if not previous.get("group_name") and name:
-                            previous["group_name"] = name
-                        if member_count > int(previous.get("member_count") or 0):
-                            previous["member_count"] = member_count
-                        continue
-                    record = {
-                        "group_id": group_id,
-                        "group_name": name,
-                        "member_count": member_count,
-                        "platform_id": platform_id,
-                    }
-                    seen[group_id] = record
-                    groups.append(record)
-
-            if platform_count == 0:
-                warnings.append(
-                    "未检测到 aiocqhttp 平台，无法自动获取群列表；"
-                    "可在页面中手动输入群号添加管理对象。"
-                )
-            if not groups and warnings and self._last_group_success:
-                groups = list(self._last_group_success)
-                warnings.append("本次未获取到群列表，已使用上次成功获取的缓存。")
-            if groups:
-                self._last_group_success = list(groups)
-
-            groups.sort(
-                key=lambda item: (
-                    0,
-                    int(item["group_id"]),
-                )
-                if str(item["group_id"]).isdigit()
-                else (1, item["group_id"])
+        if platform is None:
+            error = (
+                f"未找到适配器 {BOUND_PLATFORM_ID}，"
+                "已停止读取群列表；不会回退到其他账号。"
             )
-            self._group_cache = (time.monotonic(), list(groups), list(warnings))
-            return groups, warnings
+            return GroupListResult([], warnings, account, error)
+
+        try:
+            meta = platform.meta()
+        except Exception as exc:
+            error = f"读取适配器 {BOUND_PLATFORM_ID} 信息失败：{type(exc).__name__}: {exc}"
+            return GroupListResult([], warnings, account, error)
+
+        if getattr(meta, "name", "") != "aiocqhttp":
+            error = (
+                f"适配器 {BOUND_PLATFORM_ID} 类型为 "
+                f"{getattr(meta, 'name', '')!r}，不是 aiocqhttp，已停止读取。"
+            )
+            return GroupListResult([], warnings, account, error)
+
+        get_client = getattr(platform, "get_client", None)
+        if not callable(get_client):
+            error = f"适配器 {BOUND_PLATFORM_ID} 不支持获取 OneBot 客户端。"
+            return GroupListResult([], warnings, account, error)
+
+        try:
+            client = get_client()
+        except Exception as exc:
+            error = f"获取适配器 {BOUND_PLATFORM_ID} 客户端失败：{type(exc).__name__}: {exc}"
+            return GroupListResult([], warnings, account, error)
+
+        try:
+            login_result = await self._call_onebot_action(client, "get_login_info")
+            login_data = self._onebot_payload(login_result)
+        except Exception as exc:
+            error = (
+                "读取机器人登录信息失败，已停止读取群列表："
+                f"{type(exc).__name__}: {exc}"
+            )
+            return GroupListResult([], warnings, account, error)
+
+        if not isinstance(login_data, dict):
+            error = "机器人登录信息格式异常，已停止读取群列表。"
+            return GroupListResult([], warnings, account, error)
+
+        qq = str(
+            login_data.get("user_id")
+            or login_data.get("qq")
+            or login_data.get("uin")
+            or ""
+        ).strip()
+        nickname = str(login_data.get("nickname") or "").strip()
+        account = BotAccount(qq=qq, nickname=nickname)
+        if not qq:
+            error = "机器人登录信息缺少 QQ 号，已停止读取群列表。"
+            return GroupListResult([], warnings, account, error)
+        if qq != BOUND_BOT_QQ:
+            error = (
+                f"机器人账号不匹配：期望 {BOUND_BOT_QQ}，"
+                f"适配器 {BOUND_PLATFORM_ID} 实际登录为 {qq}"
+                f"{('（' + nickname + '）') if nickname else ''}。"
+                "已停止读取群列表，不会回退到其他账号。"
+            )
+            return GroupListResult([], warnings, account, error)
+
+        account = BotAccount(qq=qq, nickname=nickname, verified=True)
+        try:
+            groups_result = await self._call_onebot_action(client, "get_group_list")
+            items = self._onebot_payload(groups_result)
+        except Exception as exc:
+            error = (
+                f"机器人 {qq} 已通过登录验证，但读取群列表失败："
+                f"{type(exc).__name__}: {exc}"
+            )
+            return GroupListResult([], warnings, account, error)
+
+        if not isinstance(items, list):
+            error = (
+                f"机器人 {qq} 的群列表返回格式异常："
+                f"{type(items).__name__}，已停止使用该数据。"
+            )
+            return GroupListResult([], warnings, account, error)
+
+        groups: list[dict[str, Any]] = []
+        seen: dict[str, dict[str, Any]] = {}
+        invalid_count = 0
+        for item in items:
+            if not isinstance(item, dict):
+                invalid_count += 1
+                continue
+            try:
+                group_id = parse_group_id(item.get("group_id"))
+            except ValidationError:
+                invalid_count += 1
+                continue
+            name = str(item.get("group_name") or "").strip()
+            try:
+                member_count = int(item.get("member_count") or 0)
+            except (TypeError, ValueError):
+                member_count = 0
+            previous = seen.get(group_id)
+            if previous is not None:
+                if not previous.get("group_name") and name:
+                    previous["group_name"] = name
+                if member_count > int(previous.get("member_count") or 0):
+                    previous["member_count"] = member_count
+                continue
+            record = {
+                "group_id": group_id,
+                "group_name": name,
+                "member_count": member_count,
+                "platform_id": BOUND_PLATFORM_ID,
+            }
+            seen[group_id] = record
+            groups.append(record)
+
+        if invalid_count:
+            warnings.append(
+                f"机器人 {qq} 的群列表中有 {invalid_count} 条记录格式无效，已跳过。"
+            )
+        if items and not groups:
+            error = (
+                f"机器人 {qq} 返回了 {len(items)} 条群列表数据，但没有任何有效群号，"
+                "已停止使用该数据。"
+            )
+            return GroupListResult([], warnings, account, error)
+
+        groups.sort(
+            key=lambda item: (
+                0,
+                int(item["group_id"]),
+            )
+            if str(item["group_id"]).isdigit()
+            else (1, item["group_id"])
+        )
+        return GroupListResult(groups, warnings, account)
+
+    async def _call_onebot_action(
+        self,
+        client: Any,
+        action_name: str,
+        *,
+        timeout: float = 8,
+    ) -> Any:
+        action = getattr(client, "call_action", None)
+        if callable(action):
+            return await asyncio.wait_for(action(action_name), timeout=timeout)
+        method = getattr(client, action_name, None)
+        if not callable(method):
+            raise RuntimeError(f"OneBot 客户端不支持 {action_name}")
+        return await asyncio.wait_for(method(), timeout=timeout)
+
+    @staticmethod
+    def _onebot_payload(result: Any) -> Any:
+        if not isinstance(result, dict):
+            return result
+        status = result.get("status")
+        if status is not None and str(status).lower() not in {"ok", "async"}:
+            raise RuntimeError(f"OneBot 返回状态异常：{status}")
+        retcode = result.get("retcode")
+        if retcode not in (None, 0):
+            raise RuntimeError(f"OneBot 返回错误码：{retcode}")
+        if "data" in result:
+            return result["data"]
+        return result
+
+    async def _verify_group_for_write(self, group_id: str) -> str:
+        """Return an error string unless group_id is verified for this bot."""
+        result = await self._get_group_list()
+        if not result.ok:
+            return result.error or "机器人账号或群列表验证失败，已拒绝写入。"
+        verified_ids = {item["group_id"] for item in result.groups}
+        if group_id not in verified_ids:
+            return (
+                f"群 {group_id} 不在机器人 {result.account.qq} 的当前群列表中，"
+                "已拒绝写入。"
+            )
+        return ""
 
     def _cached_group_name(self, group_id: str) -> str:
         observed = self.store.observed_snapshot().get(group_id, {})
@@ -524,7 +684,7 @@ class QQGroupQuickControl(Star):
         if name:
             return name
         if self._group_cache:
-            for item in self._group_cache[1]:
+            for item in self._group_cache[1].groups:
                 if item["group_id"] == group_id:
                     return str(item.get("group_name") or "")
         for item in self._last_group_success:
@@ -532,44 +692,69 @@ class QQGroupQuickControl(Star):
                 return str(item.get("group_name") or "")
         return ""
 
+    def _preserved_counts(
+        self, verified_groups: list[dict[str, Any]] | None
+    ) -> dict[str, Any]:
+        if verified_groups is None:
+            return {
+                "configured_not_in_bot": None,
+                "observed_not_in_bot": None,
+                "whitelist_not_in_bot": None,
+            }
+        verified_ids = {item["group_id"] for item in verified_groups}
+        configs = set(self.store.snapshot())
+        observed = set(self.store.observed_snapshot())
+        whitelist_ids = {
+            group_id
+            for entry in self._global_state()["whitelist"]
+            if (group_id := extract_group_id_from_whitelist_entry(entry))
+        }
+        return {
+            "configured_not_in_bot": len(configs - verified_ids),
+            "observed_not_in_bot": len(observed - verified_ids),
+            "whitelist_not_in_bot": len(whitelist_ids - verified_ids),
+        }
+
+    def _preserved_warnings(self, preserved: dict[str, Any]) -> list[str]:
+        warnings: list[str] = []
+        configured = preserved.get("configured_not_in_bot")
+        observed = preserved.get("observed_not_in_bot")
+        whitelist = preserved.get("whitelist_not_in_bot")
+        if configured:
+            warnings.append(
+                f"有 {configured} 个历史群配置未显示：机器人当前不在这些群。"
+                "配置已保留，未被删除。"
+            )
+        if observed:
+            warnings.append(
+                f"有 {observed} 个观察缓存群未显示：机器人当前不在这些群。"
+                "缓存已保留，不会被当作已加入群。"
+            )
+        if whitelist:
+            warnings.append(
+                f"有 {whitelist} 个主动回复白名单群不在当前机器人列表，已忽略。"
+            )
+        return warnings
+
     def _build_group_views(
-        self, onebot_groups: list[dict[str, Any]]
+        self, verified_groups: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         configs = self.store.snapshot()
         observed = self.store.observed_snapshot()
-        onebot_map = {item["group_id"]: item for item in onebot_groups}
-        global_state = self._global_state()
-
-        ids: set[str] = set(configs)
-        ids.update(onebot_map)
-        ids.update(observed)
-        for entry in global_state["whitelist"]:
-            group_id = extract_group_id_from_whitelist_entry(entry)
-            if group_id:
-                ids.add(group_id)
+        onebot_map = {item["group_id"]: item for item in verified_groups}
 
         views: list[dict[str, Any]] = []
-        for group_id in ids:
-            if group_id in onebot_map:
-                source = "onebot"
-            elif group_id in configs:
-                source = "config"
-            elif group_id in observed:
-                source = "observed"
-            else:
-                source = "active_reply_whitelist"
-            onebot = onebot_map.get(group_id, {})
-            group_name = str(
-                onebot.get("group_name")
-                or observed.get(group_id, {}).get("group_name")
-                or ""
+        for group_id, onebot in onebot_map.items():
+            observed_name = str(
+                observed.get(group_id, {}).get("group_name") or ""
             ).strip()
+            group_name = str(onebot.get("group_name") or observed_name).strip()
             member_count = int(onebot.get("member_count") or 0)
             views.append(
                 self._build_group_view(
                     group_id,
                     configs.get(group_id),
-                    source=source,
+                    source="onebot",
                     group_name=group_name,
                     member_count=member_count,
                 )

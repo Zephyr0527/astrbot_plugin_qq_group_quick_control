@@ -14,6 +14,11 @@ const ui = {
   statConfigured: document.getElementById("stat-configured"),
   globalAuto: document.getElementById("global-auto"),
   adapterState: document.getElementById("adapter-state"),
+  botAccountName: document.getElementById("bot-account-name"),
+  botAccountQq: document.getElementById("bot-account-qq"),
+  botAccountPlatform: document.getElementById("bot-account-platform"),
+  botAccountStatus: document.getElementById("bot-account-status"),
+  botAccountNote: document.getElementById("bot-account-note"),
   warningPanel: document.getElementById("warning-panel"),
   warningList: document.getElementById("warning-list"),
   dialog: document.getElementById("add-dialog"),
@@ -29,6 +34,10 @@ const ui = {
 
 const state = {
   groups: [],
+  botAccount: {},
+  listStatus: "ok",
+  listError: "",
+  preserved: {},
   global: {},
   adapters: {},
   defaults: {},
@@ -128,6 +137,10 @@ async function loadGroups({ refresh = false } = {}) {
     const params = refresh ? { refresh: "1" } : {};
     const data = await requestApi("GET", "groups", params);
     state.groups = Array.isArray(data.groups) ? data.groups : [];
+    state.botAccount = data.bot_account || {};
+    state.listStatus = data.list_status === "ok" ? "ok" : "error";
+    state.listError = data.list_error || "";
+    state.preserved = data.preserved || {};
     state.global = data.global || {};
     state.adapters = data.adapters || {};
     state.defaults = data.defaults || {};
@@ -136,28 +149,73 @@ async function loadGroups({ refresh = false } = {}) {
     renderAll();
   } catch (error) {
     state.groups = [];
+    state.botAccount = {
+      platform_id: "qq-snowluma",
+      expected_qq: "3566720028",
+      qq: "",
+      nickname: "",
+      verified: false,
+      error: error.message,
+    };
+    state.listStatus = "error";
+    state.listError = error.message;
+    state.preserved = {};
     state.warnings = [];
-    renderWarnings();
-    renderStats();
-    ui.grid.replaceChildren();
-    ui.empty.hidden = false;
-    setEmptyState("群列表读取失败", error.message);
-    ui.noResults.hidden = true;
-    ui.resultCount.textContent = "读取失败";
+    renderAll();
     showToast(error.message, "error");
   } finally {
     state.loading = false;
     ui.refresh.disabled = false;
-    ui.openAdd.disabled = !state.canWrite;
-    ui.emptyAdd.disabled = !state.canWrite;
+    updateAddButtons();
     ui.grid.removeAttribute("aria-busy");
   }
 }
 
+function updateAddButtons() {
+  const canAdd =
+    state.canWrite &&
+    state.botAccount.verified === true &&
+    state.listStatus === "ok";
+  ui.openAdd.disabled = !canAdd;
+  ui.emptyAdd.disabled = !canAdd;
+}
+
 function renderAll() {
+  renderAccount();
   renderWarnings();
   renderStats();
   renderGroups();
+  updateAddButtons();
+}
+
+function renderAccount() {
+  const account = state.botAccount || {};
+  const verified = account.verified === true;
+  const listOk = state.listStatus === "ok";
+  ui.botAccountName.textContent =
+    account.nickname || (account.qq ? `QQ ${account.qq}` : "未识别");
+  ui.botAccountQq.textContent = account.qq
+    ? `QQ ${account.qq}`
+    : `期望 QQ ${account.expected_qq || "3566720028"}`;
+  ui.botAccountPlatform.textContent = account.platform_id || "qq-snowluma";
+
+  let statusText = "正在验证机器人账号…";
+  let statusKind = "";
+  if (verified && listOk) {
+    statusText = "账号已验证 · 群列表仅来自该账号";
+    statusKind = "ok";
+  } else if (verified) {
+    statusText = "账号已验证，但群列表读取失败";
+    statusKind = "error";
+  } else {
+    statusText = account.error || state.listError || "账号验证失败";
+    statusKind = "error";
+  }
+  ui.botAccountStatus.textContent = statusText;
+  ui.botAccountStatus.className = `account-status ${statusKind}`.trim();
+  ui.botAccountNote.textContent = verified
+    ? `已锁定适配器 ${account.platform_id || "qq-snowluma"}，只显示该账号实际加入的群。`
+    : "账号未验证时不会读取或显示任何群列表；不会回退到其他 QQ 账号。";
 }
 
 function renderWarnings() {
@@ -213,12 +271,25 @@ function renderStats() {
 
 function renderGroups() {
   ui.grid.replaceChildren();
-  ui.empty.hidden = state.groups.length !== 0;
 
+  if (state.listStatus === "error") {
+    ui.empty.hidden = false;
+    setEmptyState(
+      "无法读取机器人群列表",
+      state.listError ||
+        state.botAccount.error ||
+        "机器人账号验证失败，已停止读取；不会回退到其他账号。",
+    );
+    ui.noResults.hidden = true;
+    ui.resultCount.textContent = "读取失败";
+    return;
+  }
+
+  ui.empty.hidden = state.groups.length !== 0;
   if (!state.groups.length) {
     setEmptyState(
-      "还没有可管理的群",
-      "如果 OneBot 已连接，点击「刷新群列表」即可读取群列表；也可以直接输入群号添加。",
+      "机器人当前没有加入任何群",
+      "已确认机器人账号，但它的群列表为空。只有机器人实际加入的群才会显示。",
     );
     ui.noResults.hidden = true;
     ui.resultCount.textContent = "共 0 个群";
@@ -498,6 +569,13 @@ async function resetGroup(card) {
 }
 
 function openAddDialog() {
+  if (ui.openAdd.disabled) {
+    showToast(
+      "当前无法添加群：机器人账号未验证或群列表读取失败。",
+      "error",
+    );
+    return;
+  }
   ui.addError.hidden = true;
   ui.addError.textContent = "";
   ui.addForm.reset();

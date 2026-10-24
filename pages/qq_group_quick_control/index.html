@@ -21,11 +21,26 @@
           <button id="refresh-button" class="button ghost" type="button">
             刷新群列表
           </button>
-          <button id="open-add-button" class="button primary" type="button">
+          <button id="open-add-button" class="button primary" type="button" disabled>
             添加群
           </button>
         </div>
       </header>
+
+      <section id="bot-account-panel" class="bot-account-panel" aria-live="polite">
+        <div class="bot-account-head">
+          <span class="bot-account-eyebrow">当前绑定机器人</span>
+          <span id="bot-account-status" class="account-status">正在验证…</span>
+        </div>
+        <div class="bot-account-main">
+          <strong id="bot-account-name">读取中…</strong>
+          <span id="bot-account-qq" class="bot-account-qq">QQ —</span>
+          <span id="bot-account-platform" class="bot-account-platform">qq-snowluma</span>
+        </div>
+        <p id="bot-account-note" class="bot-account-note">
+          群列表只读取该账号实际加入的群；其他账号的群不会混入。
+        </p>
+      </section>
 
       <section id="warning-panel" class="warning-panel" hidden aria-live="polite">
         <h2>运行提示</h2>
@@ -71,9 +86,10 @@
         <div class="empty-art" aria-hidden="true">群</div>
         <h2>还没有可管理的群</h2>
         <p>
-          如果 OneBot 已连接，点击「刷新群列表」即可读取群列表；也可以直接输入群号添加。
+          如果机器人账号验证通过，点击「刷新群列表」即可读取它实际加入的群；
+          「添加群」只用于把已加入的群加入管理，机器人未加入的群会被拒绝。
         </p>
-        <button id="empty-add-button" class="button primary" type="button">
+        <button id="empty-add-button" class="button primary" type="button" disabled>
           手动添加群
         </button>
       </section>
@@ -254,8 +270,8 @@
           />
         </label>
         <p class="dialog-hint">
-          如果 OneBot 能读取群列表，会先校验收到的群号；读取失败时允许手动添加，
-          请自行核对群号。新群默认关闭表情包、保留回应。
+          只会添加机器人 3566720028 当前实际加入的群；账号验证或群列表读取失败时不能添加，
+          也不会回退到其他 QQ 账号。新群默认关闭表情包、保留回应。
         </p>
         <p id="add-error" class="form-error" role="alert" hidden></p>
         <div class="dialog-actions">
